@@ -1,0 +1,72 @@
+# ============================================================
+# Docker Compose — 一键部署
+# ============================================================
+# 使用方法:
+#   1. 修改下方 volumes 中的源码路径
+#   2. docker compose up -d
+#   3. curl http://localhost:3100/api/health
+# ============================================================
+
+version: '3.8'
+
+services:
+  qa-for-code:
+    build: .
+    container_name: qa-for-code
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3100}:3100"
+
+    environment:
+      # === 必须配置 ===
+      # 源码目录在容器内的路径（与 volumes 挂载对应）
+      - SOURCE_REPO_PATH=/src-repo
+
+      # === 可选配置 ===
+      # Claude Code 模型 (留空使用默认)
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-}
+      # 会话过期时间 ms (默认 30 分钟)
+      - SESSION_TTL_MS=${SESSION_TTL_MS:-1800000}
+      # 单次运行超时 ms (默认 5 分钟)
+      - RUN_TIMEOUT_MS=${RUN_TIMEOUT_MS:-300000}
+      # 最大并发 Claude Code 进程数
+      - MAX_CONCURRENT=${MAX_CONCURRENT:-3}
+
+      # === Claude Code 认证（二选一） ===
+      # 方式 1: 使用 API Key (Anthropic 官方)
+      # 先运行 claude login 获取 OAuth token，
+      # 或设置 ANTHROPIC_API_KEY
+      # 方式 2: 使用第三方 API 代理
+      # ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+      # ANTHROPIC_AUTH_TOKEN=your-api-key
+
+    volumes:
+      # ★★★ 核心: 挂载你的源码目录到 /src-repo ★★★
+      # 修改左侧路径为你的实际源码路径
+      - ./src-repo:/src-repo:ro
+
+      # Claude Code 认证持久化（OAuth token 等）
+      # 先在本机运行一次 claude 登录:
+      #   docker compose run --rm qa-for-code claude login
+      # 然后取消下面这行的注释以持久化认证状态
+      # - claude-auth:/home/node/.claude
+
+    # ========== 安全限制 ==========
+    # 只读根文件系统（防止 Claude Code 写文件到容器）
+    read_only: true
+    # /tmp 需要可写（Claude Code 运行时需求）
+    tmpfs:
+      - /tmp:exec,size=256M
+    # 安全选项
+    security_opt:
+      - no-new-privileges:true
+    # 限制资源
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2'
+
+# ========== 持久化卷 ==========
+# volumes:
+#   claude-auth:

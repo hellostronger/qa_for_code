@@ -1,0 +1,233 @@
+// ============================================================
+// /api/ask 路由 — 发起问题 + SSE 事件流
+// ============================================================
+
+import { Hono } from 'hono';
+import type { Context } from 'hono';
+import { runClaude, ConcurrentLimitError } from '../claude/runner.js';
+import { findClaudeBinary } from '../claude/launch.js';
+import { SSEEmitter, createSSEResponse } from '../sse.js';
+import { SessionManager } from '../sessions/manager.js';
+import type { AppConfig, AskRequest, AskResponse, Message, StreamEvent } from '../types.js';
+
+// ========== 运行中的 run 追踪 ==========
+
+interface ActiveRun {
+  emitter: SSEEmitter;
+  abort: AbortController;
+}
+
+export function createAskRoute(config: AppConfig, sessions: SessionManager) {
+  const app = new Hono();
+
+  // 活跃的 runs
+  const activeRuns = new Map<string, ActiveRun>();
+
+  // ================================================================
+  // POST /api/ask — 发起问题
+  // ================================================================
+  app.post('/', async (c: Context) => {
+    // 1. 预检：claude 是否可用
+    try {
+      await findClaudeBinary();
+    } catch (err: any) {
+      return c.json({ error: 'Claude Code CLI 未安装或不可用。', detail: err.message }, 503);
+    }
+
+    // 2. 解析请求
+    let body: AskRequest;
+    try {
+      body = await c.req.json<AskRequest>();
+    } catch {
+      return c.json({ error: '请求体必须是 JSON 格式' }, 400);
+    }
+
+    if (!body.question || typeof body.question !== 'string' || !body.question.trim()) {
+      return c.json({ error: 'question 字段不能为空' }, 400);
+    }
+
+    // 3. 获取或创建会话
+    let session = body.sessionId ? sessions.get(body.sessionId) : undefined;
+    if (body.sessionId && !session) {
+      return c.json({ error: '会话不存在或已过期' }, 404);
+    }
+    if (!session) {
+      session = sessions.create();
+    }
+
+    // 4. 创建 run
+    const runId = crypto.randomUUID();
+    const emitter = new SSEEmitter(runId);
+    const abort = new AbortController();
+
+    activeRuns.set(runId, { emitter, abort });
+
+    // 5. 记录用户消息
+    const userMsg: Message = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: body.question,
+      timestamp: Date.now(),
+    };
+    sessions.addMessage(session.id, userMsg);
+
+    // 6. 异步启动 Claude Code
+    const assistantMsg: Message = {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      content: '',
+      thinking: '',
+      tools: [],
+      timestamp: Date.now(),
+    };
+    sessions.addMessage(session.id, assistantMsg);
+
+    // 不 await — 让 SSE 流独立运行
+    runInBackground(runId, body.question, session.id, assistantMsg.id, config, sessions, emitter, abort.signal);
+
+    // 7. 返回 runId + sessionId
+    const response: AskResponse = { runId, sessionId: session.id };
+    return c.json(response);
+  });
+
+  // ================================================================
+  // GET /api/ask/:runId/events — SSE 事件流
+  // ================================================================
+  app.get('/:runId/events', (c: Context) => {
+    const runId = c.req.param('runId')!;
+    const run = activeRuns.get(runId);
+
+    if (!run) {
+      return c.json({ error: 'Run 不存在或已结束' }, 404);
+    }
+
+    // 支持 Last-Event-ID header（断线重连）
+    const lastEventId = c.req.header('Last-Event-ID') || c.req.query('after') || null;
+
+    return createSSEResponse(run.emitter, lastEventId, c.req.raw.signal);
+  });
+
+  // ================================================================
+  // DELETE /api/ask/:runId — 取消运行
+  // ================================================================
+  app.delete('/:runId', (c: Context) => {
+    const runId = c.req.param('runId')!;
+    const run = activeRuns.get(runId);
+
+    if (!run) {
+      return c.json({ error: 'Run 不存在' }, 404);
+    }
+
+    run.abort.abort();
+    run.emitter.push({ type: 'status', label: 'failed' });
+    run.emitter.push({ type: 'error', message: '用户取消了请求' });
+    run.emitter.close();
+
+    // 延迟清理（等待 SSE 连接感知关闭）
+    setTimeout(() => activeRuns.delete(runId), 10000);
+
+    return c.json({ ok: true });
+  });
+
+  return app;
+}
+
+// ========== 后台异步执行 Claude Code ==========
+
+async function runInBackground(
+  runId: string,
+  question: string,
+  sessionId: string,
+  assistantMsgId: string,
+  config: AppConfig,
+  sessions: SessionManager,
+  emitter: SSEEmitter,
+  signal: AbortSignal,
+): Promise<void> {
+  try {
+    const history = sessions.getHistory(sessionId);
+    // history 中已经包含当前 user 消息，去掉最后一条（即是当前这条）
+    const prevHistory = history.slice(0, -1);
+
+    const result = await runClaude({
+      question,
+      cwd: config.sourceRepoPath,
+      config,
+      history: prevHistory,
+      onEvent: (event: StreamEvent) => {
+        emitter.push(event);
+        // 实时更新 assistant 消息到 session
+        updateAssistantMessage(sessions, sessionId, assistantMsgId, event);
+      },
+      signal,
+    });
+
+    if (result.exitCode !== 0) {
+      emitter.push({ type: 'error', message: `Claude Code 异常退出 (exit code: ${result.exitCode})` });
+    }
+    emitter.push({ type: 'status', label: result.exitCode === 0 ? 'completed' : 'failed' });
+  } catch (err: any) {
+    if (err instanceof ConcurrentLimitError) {
+      emitter.push({ type: 'error', message: err.message });
+    } else {
+      emitter.push({ type: 'error', message: `运行失败: ${err.message}` });
+    }
+    emitter.push({ type: 'status', label: 'failed' });
+  } finally {
+    emitter.close();
+  }
+}
+
+// ========== 实时更新 assistant 消息到 session ==========
+
+function updateAssistantMessage(
+  sessions: SessionManager,
+  sessionId: string,
+  msgId: string,
+  event: StreamEvent,
+): void {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+
+  const msg = session.messages.find((m) => m.id === msgId);
+  if (!msg) return;
+
+  switch (event.type) {
+    case 'text_delta':
+      msg.content += event.delta;
+      break;
+    case 'thinking_delta':
+      msg.thinking = (msg.thinking || '') + event.delta;
+      break;
+    case 'tool_use': {
+      if (!msg.tools) msg.tools = [];
+      // 避免重复添加同一个 tool_use
+      if (!msg.tools.some((t) => t.id === event.id)) {
+        msg.tools.push({
+          id: event.id,
+          name: event.name,
+          input: event.input,
+          result: undefined,
+          isError: false,
+        });
+      }
+      break;
+    }
+    case 'tool_result': {
+      if (!msg.tools) msg.tools = [];
+      const tool = msg.tools.find((t) => t.id === event.toolUseId);
+      if (tool) {
+        tool.result = event.content;
+        tool.isError = event.isError;
+      }
+      break;
+    }
+    case 'usage':
+      msg.usage = {
+        inputTokens: event.inputTokens,
+        outputTokens: event.outputTokens,
+        costUsd: event.costUsd,
+      };
+      break;
+  }
+}
