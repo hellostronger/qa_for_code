@@ -73,6 +73,7 @@ export async function runClaude(options: RunOptions): Promise<RunResult> {
   try {
     // ── 1. 查找 claude 二进制 ──
     const binary = config.claudeBinary || (await findClaudeBinary());
+    console.log('[runner] Resolved binary:', binary);
 
     // ── 2. 构建 CLI 参数 ──
     const args = [
@@ -95,10 +96,13 @@ export async function runClaude(options: RunOptions): Promise<RunResult> {
     }
 
     // ── 4. spawn ──
+    const isCmd = binary.endsWith('.cmd') || binary.endsWith('.bat');
     child = spawn(binary, args, {
       env,
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
+      shell: isCmd || undefined,
+      windowsVerbatimArguments: process.platform === 'win32' && !isCmd,
     });
 
     // ── 5. 超时 ──

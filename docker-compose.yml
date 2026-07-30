@@ -1,72 +1,100 @@
 # ============================================================
-# Docker Compose — 一键部署
+# Docker Compose — 一键部署 Code QA Service
 # ============================================================
-# 使用方法:
-#   1. 修改下方 volumes 中的源码路径
-#   2. docker compose up -d
-#   3. curl http://localhost:3100/api/health
+#
+# 快速开始:
+#   1. 准备 .env 文件（复制 .env.example 并填写）
+#   2. 把源码放到 ./src-repo/ 或修改下方挂载路径
+#   3. docker compose up -d
+#   4. curl http://localhost:3100/api/health
+#
+# 认证方式: 见下方 ANTHROPIC_API_KEY / CLAUDE_OAUTH 注释
 # ============================================================
 
 version: '3.8'
 
 services:
   qa-for-code:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qa-for-code:latest
     container_name: qa-for-code
     restart: unless-stopped
     ports:
       - "${PORT:-3100}:3100"
 
+    # ============================================================
+    # 环境变量
+    # ============================================================
     environment:
-      # === 必须配置 ===
-      # 源码目录在容器内的路径（与 volumes 挂载对应）
+      # --- 必填: 认证（二选一） ---
+      # 方式 1: API Key（推荐，最简单）
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+      # 方式 2: OAuth Token（需先在宿主机 claude login）
+      # 使用方式 2 时，取消下方 claude-auth volume 的注释，
+      # 并注释掉 ANTHROPIC_API_KEY
+
+      # --- 必填: 源码路径 ---
       - SOURCE_REPO_PATH=/src-repo
 
-      # === 可选配置 ===
-      # Claude Code 模型 (留空使用默认)
+      # --- 可选 ---
       - CLAUDE_MODEL=${CLAUDE_MODEL:-}
-      # 会话过期时间 ms (默认 30 分钟)
       - SESSION_TTL_MS=${SESSION_TTL_MS:-1800000}
-      # 单次运行超时 ms (默认 5 分钟)
       - RUN_TIMEOUT_MS=${RUN_TIMEOUT_MS:-300000}
-      # 最大并发 Claude Code 进程数
       - MAX_CONCURRENT=${MAX_CONCURRENT:-3}
 
-      # === Claude Code 认证（二选一） ===
-      # 方式 1: 使用 API Key (Anthropic 官方)
-      # 先运行 claude login 获取 OAuth token，
-      # 或设置 ANTHROPIC_API_KEY
-      # 方式 2: 使用第三方 API 代理
-      # ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
-      # ANTHROPIC_AUTH_TOKEN=your-api-key
+      # --- 第三方 API 代理（可选） ---
+      # 例如使用 DeepSeek:
+      # - ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+      # - ANTHROPIC_AUTH_TOKEN=sk-your-deepseek-key
+      # - ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-chat
 
+    # ============================================================
+    # 挂载
+    # ============================================================
     volumes:
-      # ★★★ 核心: 挂载你的源码目录到 /src-repo ★★★
-      # 修改左侧路径为你的实际源码路径
+      # ★ 源码目录 — 修改左侧路径为你的实际项目路径
+      #   ro = 只读，防止 Claude Code 修改源码
       - ./src-repo:/src-repo:ro
 
-      # Claude Code 认证持久化（OAuth token 等）
-      # 先在本机运行一次 claude 登录:
-      #   docker compose run --rm qa-for-code claude login
-      # 然后取消下面这行的注释以持久化认证状态
+      # Claude Code OAuth 认证持久化（可选）
+      # 取消注释下面两行以使用 OAuth 方式:
       # - claude-auth:/home/node/.claude
 
-    # ========== 安全限制 ==========
-    # 只读根文件系统（防止 Claude Code 写文件到容器）
+    # ============================================================
+    # 安全限制
+    # ============================================================
+    # 只读根文件系统
     read_only: true
-    # /tmp 需要可写（Claude Code 运行时需求）
+
+    # /tmp 需要可写（Claude Code 运行时临时文件）
     tmpfs:
       - /tmp:exec,size=256M
+      # home 目录可写（Claude Code 缓存、凭据）
+      - /home/node/.claude:uid=1000,gid=1000,size=128M
+
     # 安全选项
     security_opt:
       - no-new-privileges:true
-    # 限制资源
+
+    # 禁止容器获取额外权限
+    cap_drop:
+      - ALL
+
+    # 资源限制
     deploy:
       resources:
         limits:
           memory: 2G
           cpus: '2'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
 
-# ========== 持久化卷 ==========
+# ============================================================
+# 持久化卷（OAuth 方式需要）
+# ============================================================
 # volumes:
 #   claude-auth:
