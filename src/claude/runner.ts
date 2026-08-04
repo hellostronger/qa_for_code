@@ -11,17 +11,17 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createClaudeParser } from './parser.js';
 import { buildSystemPrompt } from './prompt.js';
 import { findClaudeBinary, findGitBash } from './launch.js';
-import type { StreamEvent, AppConfig } from '../types.js';
+import type { StreamEvent, AppConfig, ChatMessage } from '../types.js';
 
 // ========== 类型 ==========
 
 export interface RunOptions {
-  question: string;
+  messages: ChatMessage[]; // OpenAI 规范：完整对话（含当前问题）
   cwd: string;
   config: AppConfig;
-  history?: { role: string; content: string }[];
   onEvent: (event: StreamEvent) => void;
   signal?: AbortSignal;
+  model?: string; // 可选：覆盖 config.model（如 OpenAI 请求体中的 model 字段）
 }
 
 export interface RunResult {
@@ -53,7 +53,7 @@ export function getActiveRuns(): number {
  * 后续可扩展为 sendMessage() 重用同一个进程。
  */
 export async function runClaude(options: RunOptions): Promise<RunResult> {
-  const { question, cwd, config, history, onEvent, signal } = options;
+  const { messages, cwd, config, onEvent, signal, model } = options;
 
   // ── 并发检查 ──
   if (activeRuns >= config.maxConcurrentRuns) {
@@ -83,8 +83,9 @@ export async function runClaude(options: RunOptions): Promise<RunResult> {
       '--verbose',
       '--dangerously-skip-permissions',
     ];
-    if (config.model && config.model !== 'default') {
-      args.push('--model', config.model);
+    const effectiveModel = model || config.model;
+    if (effectiveModel && effectiveModel !== 'default') {
+      args.push('--model', effectiveModel);
     }
 
     // ── 3. 构建环境变量 ──
@@ -152,14 +153,8 @@ export async function runClaude(options: RunOptions): Promise<RunResult> {
 
     // ── 10. 构建并写入 prompt ──
     const systemPrompt = buildSystemPrompt();
-    const stdinPayload = JSON.stringify({
-      type: 'user',
-      message: {
-        role: 'user',
-        content: `${systemPrompt}\n\n<question>\n${question}\n</question>`,
-      },
-    });
-    child.stdin?.write(stdinPayload + '\n');
+    const stdinPayload = buildStdinPayload(messages, systemPrompt);
+    child.stdin?.write(stdinPayload);
     // stdin 保持打开以支持后续 sendMessage（当前版本不需要）
 
     // ── 11. stdin 错误处理 ──
@@ -203,6 +198,42 @@ export class ConcurrentLimitError extends Error {
 }
 
 // ========== 工具函数 ==========
+
+/** 单条历史消息的最大长度（避免 token 浪费） */
+const MAX_HISTORY_LEN = 4000;
+
+/**
+ * 构造写入 claude stdin 的 stream-json payload。
+ *
+ * 多轮遵循 OpenAI 规范：messages 数组承载完整对话，逐条输出为
+ * stream-json 的 user/assistant 消息。系统提示词注入最后一条
+ * user 消息（当前问题），与旧版单轮行为保持一致。
+ */
+export function buildStdinPayload(
+  messages: ChatMessage[],
+  systemPrompt: string,
+): string {
+  const lines: string[] = [];
+  messages.forEach((msg, i) => {
+    const isLast = i === messages.length - 1;
+    // 系统提示词随最后一条 user 消息注入（保持现状行为）
+    const content = isLast
+      ? `${systemPrompt}\n\n<question>\n${msg.content}\n</question>`
+      : truncate(msg.content);
+    lines.push(JSON.stringify({
+      type: msg.role === 'assistant' ? 'assistant' : 'user',
+      message: { role: msg.role, content },
+    }));
+  });
+  return lines.join('\n') + '\n';
+}
+
+/** 截断过长的历史消息 */
+function truncate(content: string): string {
+  return content.length > MAX_HISTORY_LEN
+    ? content.slice(0, MAX_HISTORY_LEN) + '...'
+    : content;
+}
 
 /** Claude Code 输出的一些诊断噪音不应作为错误事件发送 */
 function isDiagnosticNoise(text: string): boolean {

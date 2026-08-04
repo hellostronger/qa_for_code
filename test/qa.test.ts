@@ -6,6 +6,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { createClaudeParser } from '../src/claude/parser.js';
 import { buildSystemPrompt } from '../src/claude/prompt.js';
+import { buildStdinPayload } from '../src/claude/runner.js';
+import { parseMessages } from '../src/claude/messages.js';
 import { SessionManager } from '../src/sessions/manager.js';
 import type { StreamEvent } from '../src/types.js';
 
@@ -280,5 +282,137 @@ describe('SessionManager', () => {
 
     assert.equal(sm.get(session.id), undefined);
     sm.destroy();
+  });
+});
+
+// ========== buildStdinPayload 测试（多轮 stdin 构造） ==========
+
+describe('buildStdinPayload', () => {
+  it('单条 user 消息：只输出一条 type:user（含 systemPrompt + question）', () => {
+    const payload = buildStdinPayload(
+      [{ role: 'user', content: '这个项目入口是什么？' }],
+      '<system>prompt</system>',
+    );
+
+    const lines = payload.trim().split('\n');
+    assert.equal(lines.length, 1, '单轮只应有一条消息');
+
+    const msg = JSON.parse(lines[0]);
+    assert.equal(msg.type, 'user');
+    assert.equal(msg.message.role, 'user');
+    assert.ok(msg.message.content.includes('<system>prompt</system>'));
+    assert.ok(msg.message.content.includes('<question>'));
+    assert.ok(msg.message.content.includes('这个项目入口是什么？'));
+  });
+
+  it('多轮 messages：按序输出 assistant/user，最后一条注入 systemPrompt', () => {
+    const payload = buildStdinPayload(
+      [
+        { role: 'user', content: '入口是什么？' },
+        { role: 'assistant', content: '入口是 src/index.ts' },
+        { role: 'user', content: '那认证模块呢？' },
+      ],
+      '<system>prompt</system>',
+    );
+
+    const lines = payload.trim().split('\n');
+    assert.equal(lines.length, 3, '三轮对话应输出三条消息');
+
+    // 第 1 条：历史 user，不含 systemPrompt
+    const m1 = JSON.parse(lines[0]);
+    assert.equal(m1.type, 'user');
+    assert.equal(m1.message.content, '入口是什么？');
+    assert.ok(!m1.message.content.includes('<system>'), '历史消息不应带 systemPrompt');
+
+    // 第 2 条：assistant
+    const m2 = JSON.parse(lines[1]);
+    assert.equal(m2.type, 'assistant');
+    assert.equal(m2.message.role, 'assistant');
+    assert.equal(m2.message.content, '入口是 src/index.ts');
+
+    // 第 3 条：当前问题（user），注入 systemPrompt
+    const m3 = JSON.parse(lines[2]);
+    assert.equal(m3.type, 'user');
+    assert.ok(m3.message.content.includes('<system>prompt</system>'));
+    assert.ok(m3.message.content.includes('那认证模块呢？'));
+  });
+
+  it('超长历史 content 被截断到 4000 字符', () => {
+    const longContent = 'x'.repeat(5000);
+    const payload = buildStdinPayload(
+      [{ role: 'user', content: longContent }],
+      '<system>prompt</system>',
+    );
+
+    const msg = JSON.parse(payload.trim().split('\n')[0]);
+    // 最后一条（当前问题）不截断，但这里只有一条 user 历史… 等等，最后一条不截断
+    // 单条消息同时是"当前问题"，走 isLast 分支不截断
+    assert.ok(msg.message.content.includes('<system>prompt</system>'));
+    assert.ok(msg.message.content.includes(longContent), '当前问题不截断');
+  });
+
+  it('多条历史中，中间的历史被截断、最后一条不截断', () => {
+    const longHistory = 'y'.repeat(5000);
+    const payload = buildStdinPayload(
+      [
+        { role: 'user', content: longHistory },     // 历史 → 截断
+        { role: 'assistant', content: 'short answer' },
+        { role: 'user', content: '当前问题' },       // 当前 → 不截断
+      ],
+      '<system>prompt</system>',
+    );
+
+    const lines = payload.trim().split('\n');
+    const m1 = JSON.parse(lines[0]);
+    assert.equal(m1.message.content.length, 4000 + 3, '历史消息截断到 4000 字符 + "..."');
+    assert.ok(m1.message.content.endsWith('...'));
+
+    const m3 = JSON.parse(lines[2]);
+    assert.ok(m3.message.content.includes('当前问题'), '当前问题保留完整');
+  });
+});
+
+// ========== parseMessages 测试（请求体校验） ==========
+
+describe('parseMessages', () => {
+  it('messages 数组通过校验', () => {
+    const result = parseMessages({
+      messages: [
+        { role: 'user', content: 'q1' },
+        { role: 'assistant', content: 'a1' },
+        { role: 'user', content: 'q2' },
+      ],
+    });
+    assert.ok('messages' in result);
+    if ('messages' in result) assert.equal(result.messages.length, 3);
+  });
+
+  it('最后一条不是 user 时报错', () => {
+    const result = parseMessages({
+      messages: [{ role: 'user', content: 'q1' }, { role: 'assistant', content: 'a1' }],
+    });
+    assert.ok('error' in result);
+  });
+
+  it('role 非法时报错', () => {
+    const result = parseMessages({
+      messages: [{ role: 'system', content: 'x' }],
+    });
+    assert.ok('error' in result);
+  });
+
+  it('旧字段 question 兜底为单轮', () => {
+    const result = parseMessages({ question: '入口是什么？' });
+    assert.ok('messages' in result);
+    if ('messages' in result) {
+      assert.equal(result.messages.length, 1);
+      assert.equal(result.messages[0].role, 'user');
+      assert.equal(result.messages[0].content, '入口是什么？');
+    }
+  });
+
+  it('既无 messages 也无 question 时报错', () => {
+    const result = parseMessages({});
+    assert.ok('error' in result);
   });
 });

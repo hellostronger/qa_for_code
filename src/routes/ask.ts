@@ -5,10 +5,11 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { runClaude, ConcurrentLimitError } from '../claude/runner.js';
+import { parseMessages } from '../claude/messages.js';
 import { findClaudeBinary } from '../claude/launch.js';
 import { SSEEmitter, createSSEResponse } from '../sse.js';
 import { SessionManager } from '../sessions/manager.js';
-import type { AppConfig, AskRequest, AskResponse, Message, StreamEvent } from '../types.js';
+import type { AppConfig, AskRequest, AskResponse, ChatMessage, Message, StreamEvent } from '../types.js';
 
 // ========== 运行中的 run 追踪 ==========
 
@@ -42,11 +43,14 @@ export function createAskRoute(config: AppConfig, sessions: SessionManager) {
       return c.json({ error: '请求体必须是 JSON 格式' }, 400);
     }
 
-    if (!body.question || typeof body.question !== 'string' || !body.question.trim()) {
-      return c.json({ error: 'question 字段不能为空' }, 400);
+    // 3. 校验并组装 messages（OpenAI 规范）
+    const messagesResult = parseMessages(body);
+    if ('error' in messagesResult) {
+      return c.json({ error: messagesResult.error }, 400);
     }
+    const messages = messagesResult.messages;
 
-    // 3. 获取或创建会话
+    // 4. 获取或创建会话
     let session = body.sessionId ? sessions.get(body.sessionId) : undefined;
     if (body.sessionId && !session) {
       return c.json({ error: '会话不存在或已过期' }, 404);
@@ -55,23 +59,24 @@ export function createAskRoute(config: AppConfig, sessions: SessionManager) {
       session = sessions.create();
     }
 
-    // 4. 创建 run
+    // 5. 创建 run
     const runId = crypto.randomUUID();
     const emitter = new SSEEmitter(runId);
     const abort = new AbortController();
 
     activeRuns.set(runId, { emitter, abort });
 
-    // 5. 记录用户消息
+    // 6. 记录用户消息（最后一条 = 当前问题）
+    const lastUserMsg = messages[messages.length - 1];
     const userMsg: Message = {
       id: crypto.randomUUID(),
       role: 'user',
-      content: body.question,
+      content: lastUserMsg.content,
       timestamp: Date.now(),
     };
     sessions.addMessage(session.id, userMsg);
 
-    // 6. 异步启动 Claude Code
+    // 7. 异步启动 Claude Code
     const assistantMsg: Message = {
       id: crypto.randomUUID(),
       role: 'assistant',
@@ -83,9 +88,9 @@ export function createAskRoute(config: AppConfig, sessions: SessionManager) {
     sessions.addMessage(session.id, assistantMsg);
 
     // 不 await — 让 SSE 流独立运行
-    runInBackground(runId, body.question, session.id, assistantMsg.id, config, sessions, emitter, abort.signal);
+    runInBackground(runId, messages, session.id, assistantMsg.id, config, sessions, emitter, abort.signal);
 
-    // 7. 返回 runId + sessionId
+    // 8. 返回 runId + sessionId
     const response: AskResponse = { runId, sessionId: session.id };
     return c.json(response);
   });
@@ -136,7 +141,7 @@ export function createAskRoute(config: AppConfig, sessions: SessionManager) {
 
 async function runInBackground(
   runId: string,
-  question: string,
+  messages: ChatMessage[],
   sessionId: string,
   assistantMsgId: string,
   config: AppConfig,
@@ -145,15 +150,10 @@ async function runInBackground(
   signal: AbortSignal,
 ): Promise<void> {
   try {
-    const history = sessions.getHistory(sessionId);
-    // history 中已经包含当前 user 消息，去掉最后一条（即是当前这条）
-    const prevHistory = history.slice(0, -1);
-
     const result = await runClaude({
-      question,
+      messages,
       cwd: config.sourceRepoPath,
       config,
-      history: prevHistory,
       onEvent: (event: StreamEvent) => {
         emitter.push(event);
         // 实时更新 assistant 消息到 session

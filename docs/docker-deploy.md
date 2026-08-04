@@ -47,6 +47,7 @@ docker run -d \
   -p 3100:3100 \
   -e ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxx \
   -v /你的项目源码路径:/src-repo:ro \
+  -v /你的自定义skill路径:/home/node/.claude/skills:ro \
   --read-only \
   --tmpfs /tmp:exec,size=256M \
   qa-for-code

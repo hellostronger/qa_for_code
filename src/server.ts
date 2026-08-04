@@ -9,6 +9,7 @@ import type { AppConfig } from './types.js';
 import { SessionManager } from './sessions/manager.js';
 import { createAskRoute } from './routes/ask.js';
 import { createSessionsRoute } from './routes/sessions.js';
+import { createOpenAIRoute } from './routes/openai.js';
 
 export function createApp(config: AppConfig) {
   const app = new Hono();
@@ -61,6 +62,9 @@ export function createApp(config: AppConfig) {
 
   // /api/sessions — 会话管理
   app.route('/api/sessions', createSessionsRoute(sessions));
+
+  // /v1 — OpenAI 兼容端点
+  app.route('/v1', createOpenAIRoute(config));
 
   // 404 兜底
   app.notFound((c) => {

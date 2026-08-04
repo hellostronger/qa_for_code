@@ -19,6 +19,7 @@ SSE 流: "认证逻辑主要在 src/auth/ 目录。JWT token 在 authService.ts:
 
 - [快速开始](#快速开始)
 - [Docker 部署](#docker-部署)
+- [自定义 Skill（技能）](#自定义-skill技能)
 - [安全：如何不暴露源码细节](#安全如何不暴露源码细节)
 - [API 文档](#api-文档)
 - [配置说明](#配置说明)
@@ -169,6 +170,59 @@ docker compose exec qa-for-code npm install -g @anthropic-ai/claude-code
 
 ---
 
+## 自定义 Skill（技能）
+
+支持向容器注入自定义技能（无需改镜像、无需改代码）。Claude Code 会自动发现两类 Skill：
+
+| 类型 | 位置 | 作用域 | 注入方式 |
+|---|---|---|---|
+| **个人级**（推荐） | 容器内 `/home/node/.claude/skills/` | 所有 repo 生效 | 宿主机 `./skills/` 文件夹映射 |
+| 项目级 | 容器内 `/src-repo/.claude/skills/` | 仅当前 repo | 放源码目录 |
+
+### 方式一：个人级 Skill（推荐）
+
+项目根目录 `skills/` 文件夹已通过 `docker-compose.yml` 映射到容器内 `/home/node/.claude/skills`，skill 对所有源码仓库生效：
+
+```
+skills/
+└── my-skill/                 # 每个 Skill 一个目录
+    ├── SKILL.md              # 必填：Skill 定义（含 frontmatter）
+    └── (其他辅助文件/脚本)
+```
+
+`SKILL.md` 示例：
+
+```markdown
+---
+name: my-skill
+description: 当用户询问 XX 时使用，作用是 YY
+---
+
+# My Skill
+
+针对用户问题执行以下步骤：
+1. 用 Grep 搜索相关代码
+2. 用 Read 读取文件
+3. 返回分析结果
+```
+
+**生效方式：**
+- 修改 `skills/` 下的文件后重新提问即生效（每次 run 重新 spawn claude），**无需重启容器**
+- 只读挂载（`:ro`），Claude Code 只会读取 skill，不会修改
+- 挂载为个人级 → 更换挂载的源码 repo 时 skill 依然生效
+
+### 方式二：项目级 Skill（备用）
+
+需要 skill 跟随某个特定源码仓库时，放进源码目录（会被挂载到 `/src-repo`）：
+
+```
+src-repo/.claude/skills/my-skill/SKILL.md
+```
+
+> 注意：`.dockerignore` 中排除了 `src-repo/*`，因此源码（含 Skill）**不会**打包进镜像——它始终通过运行时 volume 挂载注入。这正是"外网传 skill 进去"的可行通道。
+
+---
+
 ## 安全：如何不暴露源码细节
 
 这是核心安全问题。Code QA Service 的设计本质是：**用户只能看到 Claude Code 的回答，看不到原始源码**。但需要从多个层面确保安全：
@@ -306,22 +360,29 @@ RUN_TIMEOUT_MS=300000  # 单个问题最多跑 5 分钟
 
 ## API 文档
 
-### POST /api/ask — 发起问题
+### POST /api/ask — 发起问题（原生接口）
 
 ```bash
 curl -X POST http://localhost:3100/api/ask \
   -H "Content-Type: application/json" \
-  -d '{"question": "这个项目的入口文件是哪个？"}'
+  -d '{"messages": [{"role": "user", "content": "这个项目的入口文件是哪个？"}]}'
 ```
 
 **请求体：**
 ```json
 {
-  "question": "string (必填)",
+  "messages": [
+    { "role": "user", "content": "这个项目入口是什么？" },
+    { "role": "assistant", "content": "入口是 src/index.ts" },
+    { "role": "user", "content": "那认证模块呢？" }
+  ],
   "sessionId": "string (可选，不传则创建新会话)",
   "model": "string (可选，覆盖默认模型)"
 }
 ```
+
+- `messages` 为完整对话（OpenAI 规范），最后一条 `role` 必须为 `user`（当前问题），前面的 user/assistant 对是历史上下文
+- `question` 为旧字段，缺省 `messages` 时视为单轮 `[{role:'user', content:question}]`
 
 **响应：**
 ```json
@@ -379,6 +440,69 @@ GET    /api/sessions/:id     — 获取会话详情（含消息历史）
 DELETE /api/sessions/:id     — 删除会话
 DELETE /api/ask/:runId       — 取消运行中的请求
 ```
+
+### POST /v1/chat/completions — OpenAI 兼容端点
+
+将本服务作为 OpenAI 兼容模型接入（OpenAI SDK / LobeChat / ChatBox / Cherry Studio 等，配置 `base_url` 指向 `http://<host>:3100/v1` 即可提问）。
+
+```bash
+# 非流式
+curl -X POST http://localhost:3100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-5",
+    "messages": [
+      {"role": "user", "content": "这个项目入口是什么？"},
+      {"role": "assistant", "content": "入口是 src/index.ts"},
+      {"role": "user", "content": "那认证模块呢？"}
+    ]
+  }'
+
+# 流式（SSE）
+curl -N -X POST http://localhost:3100/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"stream": true, "messages": [{"role": "user", "content": "这个项目有哪些模块？"}]}'
+```
+
+**请求体（OpenAI 规范）：**
+```json
+{
+  "model": "string (可选，覆盖默认模型，如 claude-sonnet-4-5)",
+  "messages": [
+    { "role": "user", "content": "问题1" },
+    { "role": "assistant", "content": "回答1" },
+    { "role": "user", "content": "当前问题（最后一条必须为 user）" }
+  ],
+  "stream": false
+}
+```
+
+**非流式响应（OpenAI 格式）：**
+```json
+{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion",
+  "created": 1700000000,
+  "model": "claude-sonnet-4-5",
+  "choices": [
+    { "index": 0, "message": { "role": "assistant", "content": "..." }, "finish_reason": "stop" }
+  ],
+  "usage": { "prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150 }
+}
+```
+
+**流式响应**为 SSE，每帧 `data: {...}` 增量 + 结尾 `data: [DONE]`（OpenAI 标准 chunk 格式）。
+
+> 客户端接入示例（OpenAI SDK）：
+> ```js
+> import OpenAI from 'openai';
+> const client = new OpenAI({ baseURL: 'http://localhost:3100/v1', apiKey: 'any' });
+> const res = await client.chat.completions.create({
+>   model: 'claude-sonnet-4-5',
+>   messages: [{ role: 'user', content: '这个项目入口是什么？' }],
+> });
+> console.log(res.choices[0].message.content);
+> ```
 
 ---
 

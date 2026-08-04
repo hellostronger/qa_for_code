@@ -4,9 +4,16 @@
 
 // ========== HTTP 请求/响应 ==========
 
+/** OpenAI 规范的对话消息 */
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 /** POST /api/ask 请求体 */
 export interface AskRequest {
-  question: string;
+  messages?: ChatMessage[]; // OpenAI 规范：完整对话（含当前问题，最后一条为 user）
+  question?: string; // 旧字段，缺 messages 时作为单轮兜底
   sessionId?: string; // 不传则创建新会话
   model?: string; // 覆盖默认模型
 }

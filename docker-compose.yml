@@ -59,6 +59,11 @@ services:
       #   ro = 只读，防止 Claude Code 修改源码
       - ./src-repo:/src-repo:ro
 
+      # ★ 个人级 Skill 目录（可选）— 自定义 skill 映射到容器内
+      #   ro = 只读，Claude Code 读取 skill，不会修改
+      #   skill 放宿主机 ./skills/ 下（结构: skills/<skill-name>/SKILL.md）
+      - ./skills:/home/node/.claude/skills:ro
+
       # Claude Code OAuth 认证持久化（可选）
       # 取消注释下面两行以使用 OAuth 方式:
       # - claude-auth:/home/node/.claude

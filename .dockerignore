@@ -6,3 +6,4 @@ dist
 test
 src-repo/*
 !src-repo/.gitkeep
+skills
