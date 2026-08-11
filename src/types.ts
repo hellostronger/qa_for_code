@@ -133,6 +133,11 @@ export interface ClaudeContentBlock {
   type: 'text' | 'tool_use' | 'thinking';
   id?: string;
   name?: string;
+  /** text 块的内容（assistant 消息中字段名为 text） */
+  text?: string;
+  /** thinking 块的内容（assistant 消息中字段名为 thinking） */
+  thinking?: string;
+  /** tool_use 块的参数（字段名为 input） */
   input?: unknown;
 }
 

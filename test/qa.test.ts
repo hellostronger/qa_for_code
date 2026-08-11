@@ -193,7 +193,7 @@ describe('ClaudeParser', () => {
       type: 'assistant',
       message: {
         id: 'msg_1',
-        content: [{ type: 'text', input: 'Hello' }],
+        content: [{ type: 'text', text: 'Hello' }],
       },
     }) + '\n');
     parser.flush();
@@ -202,6 +202,44 @@ describe('ClaudeParser', () => {
     const textEvents = events.filter((e) => e.type === 'text_delta');
     const hellos = textEvents.filter((e) => e.type === 'text_delta' && e.delta === 'Hello');
     assert.equal(hellos.length, 1, 'text_delta="Hello" 不应重复');
+  });
+
+  it('assistant 消息单独提供 text 块时 emit text_delta（无 stream_event 增量）', () => {
+    const events: StreamEvent[] = [];
+    const parser = createClaudeParser((e) => events.push(e));
+
+    // 某些网关/模型只回 assistant 完整消息，没有 stream_event 增量，
+    // text 块字段名是 text（不是 input）
+    parser.feed(JSON.stringify({
+      type: 'assistant',
+      message: {
+        id: 'msg_1',
+        content: [{ type: 'text', text: 'Hi there! 👋' }],
+      },
+    }) + '\n');
+    parser.flush();
+
+    const textEvents = events.filter((e) => e.type === 'text_delta');
+    assert.equal(textEvents.length, 1, '应 emit 1 个 text_delta');
+    assert.equal(textEvents[0].delta, 'Hi there! 👋');
+  });
+
+  it('assistant 消息单独提供 thinking 块时 emit thinking_delta（无 stream_event 增量）', () => {
+    const events: StreamEvent[] = [];
+    const parser = createClaudeParser((e) => events.push(e));
+
+    parser.feed(JSON.stringify({
+      type: 'assistant',
+      message: {
+        id: 'msg_1',
+        content: [{ type: 'thinking', thinking: 'Let me think...' }],
+      },
+    }) + '\n');
+    parser.flush();
+
+    const thinkingEvents = events.filter((e) => e.type === 'thinking_delta');
+    assert.equal(thinkingEvents.length, 1, '应 emit 1 个 thinking_delta');
+    assert.equal(thinkingEvents[0].delta, 'Let me think...');
   });
 });
 

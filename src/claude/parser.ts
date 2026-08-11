@@ -233,10 +233,10 @@ function handleAssistantMessage(
   emit: (ev: StreamEvent) => void,
 ): void {
   for (const block of message.content) {
-    if (block.type === 'text' && typeof block.input === 'string') {
+    if (block.type === 'text' && typeof block.text === 'string') {
       // 仅在 stream_event 中未发过的才 emit
       if (!state.hasEmittedText) {
-        emit({ type: 'text_delta', delta: block.input });
+        emit({ type: 'text_delta', delta: block.text });
         state.hasEmittedText = true;
       }
     } else if (block.type === 'tool_use' && block.id) {
@@ -250,9 +250,9 @@ function handleAssistantMessage(
           input: block.input,
         });
       }
-    } else if (block.type === 'thinking' && typeof block.input === 'string') {
+    } else if (block.type === 'thinking' && typeof block.thinking === 'string') {
       if (!state.hasEmittedThinking) {
-        emit({ type: 'thinking_delta', delta: block.input });
+        emit({ type: 'thinking_delta', delta: block.thinking });
         state.hasEmittedThinking = true;
       }
     }
