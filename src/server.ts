@@ -10,6 +10,8 @@ import { SessionManager } from './sessions/manager.js';
 import { createAskRoute } from './routes/ask.js';
 import { createSessionsRoute } from './routes/sessions.js';
 import { createOpenAIRoute } from './routes/openai.js';
+import { createFilesRoute } from './routes/files.js';
+import { FileStore } from './files/store.js';
 
 export function createApp(config: AppConfig) {
   const app = new Hono();
@@ -44,6 +46,8 @@ export function createApp(config: AppConfig) {
   // ========== 服务实例 ==========
 
   const sessions = new SessionManager(config.sessionTtlMs);
+  const files = new FileStore(config.workspaceDir, config.sessionTtlMs);
+  files.startSweeper();
 
   // ========== 路由 ==========
 
@@ -53,18 +57,22 @@ export function createApp(config: AppConfig) {
       status: 'ok',
       version: '1.0.0',
       sourceRepo: config.sourceRepoPath,
+      workspaceDir: config.workspaceDir,
       uptime: process.uptime(),
     });
   });
 
   // /api/ask — 提问 + SSE
-  app.route('/api/ask', createAskRoute(config, sessions));
+  app.route('/api/ask', createAskRoute(config, sessions, files));
 
   // /api/sessions — 会话管理
-  app.route('/api/sessions', createSessionsRoute(sessions));
+  app.route('/api/sessions', createSessionsRoute(sessions, files));
+
+  // /api/files — 生成文件下载
+  app.route('/api/files', createFilesRoute(files));
 
   // /v1 — OpenAI 兼容端点
-  app.route('/v1', createOpenAIRoute(config));
+  app.route('/v1', createOpenAIRoute(config, files));
 
   // 404 兜底
   app.notFound((c) => {
@@ -77,5 +85,5 @@ export function createApp(config: AppConfig) {
     return c.json({ error: 'Internal server error' }, 500);
   });
 
-  return { app, sessions };
+  return { app, sessions, files };
 }

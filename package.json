@@ -8,7 +8,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "node --import tsx --test test/qa.test.ts",
+    "test": "node --import tsx --test test/qa.test.ts test/files.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

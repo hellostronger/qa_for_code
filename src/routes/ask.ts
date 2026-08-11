@@ -4,12 +4,14 @@
 
 import { Hono } from 'hono';
 import type { Context } from 'hono';
-import { runClaude, ConcurrentLimitError } from '../claude/runner.js';
+import { runClaude, ConcurrentLimitError, runFailureMessage } from '../claude/runner.js';
 import { parseMessages } from '../claude/messages.js';
 import { findClaudeBinary } from '../claude/launch.js';
 import { SSEEmitter, createSSEResponse } from '../sse.js';
 import { SessionManager } from '../sessions/manager.js';
-import type { AppConfig, AskRequest, AskResponse, ChatMessage, Message, StreamEvent } from '../types.js';
+import { createRunFileTracker } from '../files/tracker.js';
+import type { FileStore } from '../files/store.js';
+import type { AppConfig, AskRequest, AskResponse, ChatMessage, FileInfo, Message, StreamEvent } from '../types.js';
 
 // ========== 运行中的 run 追踪 ==========
 
@@ -18,7 +20,7 @@ interface ActiveRun {
   abort: AbortController;
 }
 
-export function createAskRoute(config: AppConfig, sessions: SessionManager) {
+export function createAskRoute(config: AppConfig, sessions: SessionManager, fileStore: FileStore) {
   const app = new Hono();
 
   // 活跃的 runs
@@ -88,7 +90,7 @@ export function createAskRoute(config: AppConfig, sessions: SessionManager) {
     sessions.addMessage(session.id, assistantMsg);
 
     // 不 await — 让 SSE 流独立运行
-    runInBackground(runId, messages, session.id, assistantMsg.id, config, sessions, emitter, abort.signal);
+    runInBackground(runId, messages, session.id, assistantMsg.id, config, sessions, fileStore, emitter, abort.signal);
 
     // 8. 返回 runId + sessionId
     const response: AskResponse = { runId, sessionId: session.id };
@@ -146,24 +148,65 @@ async function runInBackground(
   assistantMsgId: string,
   config: AppConfig,
   sessions: SessionManager,
+  fileStore: FileStore,
   emitter: SSEEmitter,
   signal: AbortSignal,
 ): Promise<void> {
+  // 会话级工作区（多轮共享，Claude 可继续修改上轮文件）
+  const runDir = await fileStore.ensureRunDir(sessionId);
+  const tracker = createRunFileTracker(fileStore, sessionId, sessionId);
+  const t0 = Date.now();
+  console.log(
+    `[ask] run ${runId} start session=${sessionId} ` +
+      `messages=${messages.length} model=${config.model ?? 'default'}`,
+  );
+
   try {
     const result = await runClaude({
       messages,
       cwd: config.sourceRepoPath,
       config,
+      label: runId,
+      outputDir: runDir,
       onEvent: (event: StreamEvent) => {
+        // SSE 顺序修复：parser 的 flush() 会无条件发 completed（sse.ts 收到即关流，
+        // 且它早于 runClaude resolve），这里抑制它，真正的终态在 file 事件之后推。
+        if (event.type === 'status' && event.label === 'completed') return;
         emitter.push(event);
         // 实时更新 assistant 消息到 session
         updateAssistantMessage(sessions, sessionId, assistantMsgId, event);
+        // 捕获 Write 工具产物
+        tracker.handleEvent(event);
       },
       signal,
     });
+    console.log(
+      `[ask] run ${runId} end exitCode=${result.exitCode} ` +
+        `durationMs=${Date.now() - t0} killReason=${result.killReason ?? '-'}`,
+    );
+
+    // 生成文件：等待挂起写入 + 扫描目录 → 注册记录 → 推送 file 事件
+    if (!emitter.isClosed()) {
+      const files = await tracker.finalize();
+      const fileInfos: FileInfo[] = files.map((f) => ({
+        fileId: f.fileId,
+        name: f.name,
+        url: `/api/files/${f.fileId}`,
+        size: f.size,
+      }));
+      for (const info of fileInfos) {
+        emitter.push({ type: 'file', ...info });
+      }
+      // 把文件信息写入 assistant 消息
+      if (fileInfos.length > 0) {
+        const session = sessions.get(sessionId);
+        const msg = session?.messages.find((m) => m.id === assistantMsgId);
+        if (msg) msg.files = fileInfos;
+      }
+    }
 
     if (result.exitCode !== 0) {
-      emitter.push({ type: 'error', message: `Claude Code 异常退出 (exit code: ${result.exitCode})` });
+      emitter.push({ type: 'error', message: runFailureMessage(result, config.runTimeoutMs) });
     }
     emitter.push({ type: 'status', label: result.exitCode === 0 ? 'completed' : 'failed' });
   } catch (err: any) {

@@ -34,7 +34,29 @@ export type StreamEvent =
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; toolUseId: string; content: string; isError?: boolean }
   | { type: 'usage'; inputTokens: number; outputTokens: number; costUsd?: number }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'file'; fileId: string; name: string; url: string; size: number };
+
+// ========== 生成文件 ==========
+
+/** 推送给客户端/返回给 OpenAI 客户端的文件信息 */
+export interface FileInfo {
+  fileId: string;
+  name: string;
+  url: string;
+  size: number;
+}
+
+/** 文件存储中的一条记录 */
+export interface FileRecord {
+  fileId: string;
+  runId: string; // 工作区 key（sessionId 或 runId）
+  sessionId?: string;
+  name: string;
+  relativePath: string; // posix，相对 runDir
+  size: number;
+  createdAt: number;
+}
 
 // ========== SSE 传输封装 ==========
 
@@ -62,6 +84,7 @@ export interface Message {
   content: string;
   thinking?: string;
   tools?: ToolCall[];
+  files?: FileInfo[];
   usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
   timestamp: number;
 }
@@ -81,6 +104,7 @@ export interface ToolCall {
 export interface AppConfig {
   port: number;
   sourceRepoPath: string;
+  workspaceDir: string;
   model?: string;
   sessionTtlMs: number;
   runTimeoutMs: number;

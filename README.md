@@ -96,12 +96,14 @@ curl http://localhost:3100/api/health
 # 构建
 docker build -t qa-for-code .
 
-# 运行（挂载源码目录）
+# 运行（挂载源码目录 + 生成文件工作区）
 docker run -d \
   --name qa-for-code \
   -p 3100:3100 \
   -v /path/to/your/source/code:/src-repo:ro \
+  -v /path/to/workspace:/workspace \
   -e SOURCE_REPO_PATH=/src-repo \
+  -e WORKSPACE_DIR=/workspace \
   --read-only \
   --tmpfs /tmp:exec,size=256M \
   qa-for-code
@@ -506,6 +508,45 @@ curl -N -X POST http://localhost:3100/v1/chat/completions \
 
 ---
 
+## 文件生成与下载
+
+可以让 Claude Code **生成文件**并把成品交付给用户下载（如"为 auth.ts 写一个测试"、"生成一个组件"）。
+
+**原理：** Claude Code 以 `cwd=/src-repo`（只读源码）启动，系统提示词要求它把生成/修改的文件写入 `WORKSPACE_DIR`（可写工作区）。run 结束后服务端扫描工作区，注册生成文件，通过 SSE / API 返回下载链接。
+
+### 工作区
+
+- **本地开发：** `WORKSPACE_DIR` 默认 `./workspace`（已被 `.gitignore` 忽略）
+- **Docker：** compose 里挂载 named volume `workspace:/workspace`，可写；源码目录保持只读
+- **安全：** 生成文件**只落盘在 `/workspace`**，永不进入 `/src-repo` 源码目录；服务端对 Write 路径做穿越校验，下载时做符号链接逃逸防护
+
+### 触发方式
+
+用户提问时让 Claude 写文件即可，例如：
+
+```
+"在 OUTPUT_DIR 下生成一个 hello.txt，内容为 hello world"
+```
+
+### 获取生成文件
+
+- **原生接口（/api/ask）**：SSE 事件流里会多出 `file` 事件：
+  ```json
+  {"type":"file","fileId":"xxx","name":"hello.txt","url":"/api/files/xxx","size":11}
+  ```
+- **OpenAI 兼容接口（/v1/chat/completions）**：
+  - 非流式：响应 JSON 增加 `files` 数组字段
+  - 流式：结尾追加一条文本 delta（`[Generated files: ...]`）
+- **下载：** `GET /api/files/:id` 直接下载文件内容（attachment）
+
+### 会话共享
+
+工作区按 **sessionId** 隔离，同一会话的多轮提问共享一个工作区目录——Claude 在下一轮能继续读取、修改上一轮生成的文件。OpenAI 兼容端点无会话概念，工作区按 runId 隔离。
+
+> 文件随会话 TTL 自动清理（`SESSION_TTL_MS`）；删除会话时级联清理其工作区。
+
+---
+
 ## 配置说明
 
 所有配置通过环境变量设置：
@@ -513,7 +554,8 @@ curl -N -X POST http://localhost:3100/v1/chat/completions \
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `PORT` | `3100` | 服务端口 |
-| `SOURCE_REPO_PATH` | `./src-repo` | ★ 源码目录的绝对路径 |
+| `SOURCE_REPO_PATH` | `./src-repo` | ★ 源码目录的绝对路径（只读，Claude 的分析对象） |
+| `WORKSPACE_DIR` | `./workspace` | ★ 生成文件的工作区目录（可写，Claude 生成的文件落盘于此） |
 | `CLAUDE_MODEL` | (空) | Claude Code 模型 (如 `claude-sonnet-4-5`) |
 | `CLAUDE_BIN` | (PATH 查找) | 自定义 Claude Code 二进制路径 |
 | `SESSION_TTL_MS` | `1800000` | 会话过期时间 (30 分钟) |

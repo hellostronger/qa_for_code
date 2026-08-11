@@ -5,8 +5,9 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { SessionManager } from '../sessions/manager.js';
+import type { FileStore } from '../files/store.js';
 
-export function createSessionsRoute(sessions: SessionManager) {
+export function createSessionsRoute(sessions: SessionManager, fileStore: FileStore) {
   const app = new Hono();
 
   // GET /api/sessions — 列出活跃会话
@@ -25,12 +26,14 @@ export function createSessionsRoute(sessions: SessionManager) {
   });
 
   // DELETE /api/sessions/:id — 删除会话
-  app.delete('/:id', (c: Context) => {
+  app.delete('/:id', async (c: Context) => {
     const id = c.req.param('id')!;
     const existed = sessions.delete(id);
     if (!existed) {
       return c.json({ error: '会话不存在' }, 404);
     }
+    // 级联清理该会话的生成文件 + 工作区目录
+    await fileStore.deleteSession(id);
     return c.json({ ok: true });
   });
 

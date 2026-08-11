@@ -17,9 +17,19 @@ console.log(`  Model:       ${config.model || '(default)'}`);
 console.log(`  Port:        ${config.port}`);
 console.log(`  Concurrency: ${config.maxConcurrentRuns}`);
 console.log(`  Timeout:     ${config.runTimeoutMs / 1000}s`);
+console.log(`  Claude bin:  ${config.claudeBinary || '(PATH lookup)'}`);
+console.log('');
+console.log('  Claude env:');
+console.log(`    ANTHROPIC_BASE_URL        = ${process.env.ANTHROPIC_BASE_URL || '(unset)'}`);
+console.log(`    ANTHROPIC_AUTH_TOKEN      = ${process.env.ANTHROPIC_AUTH_TOKEN ? 'set' : 'unset'}`);
+console.log(`    ANTHROPIC_API_KEY         = ${process.env.ANTHROPIC_API_KEY ? 'set' : 'unset'}`);
+console.log(`    ANTHROPIC_MODEL           = ${process.env.ANTHROPIC_MODEL || '(unset)'}`);
+console.log(`    ANTHROPIC_DEFAULT_SONNET_MODEL = ${process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || '(unset)'}`);
+console.log(`    CLAUDE_BIN                = ${process.env.CLAUDE_BIN || '(unset)'}`);
+console.log(`    CLAUDE_CODE_GIT_BASH_PATH = ${process.env.CLAUDE_CODE_GIT_BASH_PATH || '(unset)'}`);
 console.log('');
 
-const { app, sessions } = createApp(config);
+const { app, sessions, files } = createApp(config);
 
 const server = serve({
   fetch: app.fetch,
@@ -37,6 +47,7 @@ function shutdown(signal: string) {
   console.log(`\n  ⏳ Received ${signal}, shutting down...`);
   server.close();
   sessions.destroy();
+  files.destroy();
   process.exit(0);
 }
 

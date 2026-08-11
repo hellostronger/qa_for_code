@@ -48,6 +48,8 @@ docker run -d \
   -e ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxx \
   -v /你的项目源码路径:/src-repo:ro \
   -v /你的自定义skill路径:/home/node/.claude/skills:ro \
+  -v /你的生成文件工作区:/workspace \
+  -e WORKSPACE_DIR=/workspace \
   --read-only \
   --tmpfs /tmp:exec,size=256M \
   qa-for-code
@@ -65,6 +67,8 @@ docker run -d \
   -p 3100:3100 \
   -v ~/.claude:/home/node/.claude:ro \
   -v /你的项目源码路径:/src-repo:ro \
+  -v /你的生成文件工作区:/workspace \
+  -e WORKSPACE_DIR=/workspace \
   --read-only \
   --tmpfs /tmp:exec,size=256M \
   qa-for-code
@@ -142,6 +146,23 @@ volumes:
 ```
 
 `ro` = 只读挂载 — **关键安全配置**，防止 Claude Code 修改你的源码。
+
+### 生成文件工作区
+
+Claude Code 生成的文件（如"写一个测试文件"）写入**独立可写工作区** `/workspace`，通过 `GET /api/files/:id` 下载：
+
+```bash
+# docker run（可写，不需 :ro）
+-v /你的工作区路径:/workspace
+-e WORKSPACE_DIR=/workspace
+
+# 或 docker-compose.yml（named volume 保留 node:node 所有权）
+volumes:
+  - workspace:/workspace
+# volumes: 定义块里加 workspace:
+```
+
+**安全属性：** 生成文件只落在 `/workspace`，永不进入 `/src-repo` 源码目录。
 
 ### 也可以把源码打包进镜像
 

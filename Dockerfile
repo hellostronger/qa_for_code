@@ -77,6 +77,8 @@ COPY --from=builder /app/dist/ ./dist/
 RUN mkdir -p /src-repo
 # Claude Code 需要可写的 home 目录（缓存、配置）
 RUN mkdir -p /home/node/.claude && chown -R node:node /home/node
+# 生成文件的工作区（运行时 volume 挂载，Claude 生成的文件落盘于此）
+RUN mkdir -p /workspace && chown -R node:node /workspace
 
 # ---------- 安全 ----------
 # 非 root 运行
@@ -84,6 +86,7 @@ USER node
 
 # 默认环境变量
 ENV SOURCE_REPO_PATH=/src-repo
+ENV WORKSPACE_DIR=/workspace
 ENV NODE_ENV=production
 ENV PORT=3100
 

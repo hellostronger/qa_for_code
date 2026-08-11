@@ -39,6 +39,9 @@ services:
       # --- 必填: 源码路径 ---
       - SOURCE_REPO_PATH=/src-repo
 
+      # --- 生成文件工作区 ---
+      - WORKSPACE_DIR=/workspace
+
       # --- 可选 ---
       - CLAUDE_MODEL=${CLAUDE_MODEL:-}
       - SESSION_TTL_MS=${SESSION_TTL_MS:-1800000}
@@ -63,6 +66,10 @@ services:
       #   ro = 只读，Claude Code 读取 skill，不会修改
       #   skill 放宿主机 ./skills/ 下（结构: skills/<skill-name>/SKILL.md）
       - ./skills:/home/node/.claude/skills:ro
+
+      # ★ 生成文件工作区（可写）— Claude 生成的文件落盘于此，通过 /api/files 下载
+      #   named volume 保留镜像内 node:node 的所有权
+      - workspace:/workspace
 
       # Claude Code OAuth 认证持久化（可选）
       # 取消注释下面两行以使用 OAuth 方式:
@@ -99,7 +106,10 @@ services:
           cpus: '0.5'
 
 # ============================================================
-# 持久化卷（OAuth 方式需要）
+# 持久化卷
 # ============================================================
-# volumes:
-#   claude-auth:
+volumes:
+  # 生成文件工作区
+  workspace:
+  # OAuth 认证持久化（可选，使用 OAuth 方式时取消注释）
+  # claude-auth:

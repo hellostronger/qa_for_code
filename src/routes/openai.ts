@@ -13,12 +13,14 @@
 
 import { Hono } from 'hono';
 import type { Context } from 'hono';
-import { runClaude, ConcurrentLimitError, getActiveRuns } from '../claude/runner.js';
+import { runClaude, ConcurrentLimitError, getActiveRuns, runFailureMessage } from '../claude/runner.js';
 import { parseMessages } from '../claude/messages.js';
 import { findClaudeBinary } from '../claude/launch.js';
-import type { AppConfig, AskRequest, ChatMessage, StreamEvent } from '../types.js';
+import { createRunFileTracker } from '../files/tracker.js';
+import type { FileStore } from '../files/store.js';
+import type { AppConfig, AskRequest, ChatMessage, FileInfo, StreamEvent } from '../types.js';
 
-export function createOpenAIRoute(config: AppConfig) {
+export function createOpenAIRoute(config: AppConfig, fileStore: FileStore) {
   const app = new Hono();
 
   // ================================================================
@@ -48,6 +50,10 @@ export function createOpenAIRoute(config: AppConfig) {
     const messages = parsed.messages;
     const stream = body.stream === true;
     const model = body.model || config.model;
+    console.log(
+      `[openai] request model=${model ?? '(config:' + (config.model ?? 'default') + ')'} ` +
+        `stream=${stream} messages=${messages.length}`,
+    );
 
     // 4. 并发检查
     if (getActiveRuns() >= config.maxConcurrentRuns) {
@@ -59,9 +65,9 @@ export function createOpenAIRoute(config: AppConfig) {
 
     // 5. 按 stream 分发
     if (stream) {
-      return handleStreaming(c, config, messages, model);
+      return handleStreaming(c, config, messages, model, fileStore);
     }
-    return handleNonStreaming(c, config, messages, model);
+    return handleNonStreaming(c, config, messages, model, fileStore);
   });
 
   return app;
@@ -74,13 +80,23 @@ async function handleNonStreaming(
   config: AppConfig,
   messages: ChatMessage[],
   model: string | undefined,
+  fileStore: FileStore,
 ): Promise<Response> {
   const runId = crypto.randomUUID();
   const id = `chatcmpl-${runId}`;
   const created = Math.floor(Date.now() / 1000);
+  const t0 = Date.now();
+  console.log(
+    `[openai] run ${runId} start stream=false ` +
+      `model=${model ?? '(config:' + (config.model ?? 'default') + ')'} messages=${messages.length}`,
+  );
 
   let content = '';
   let usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+
+  // 工作区按 runId 隔离（OpenAI 端点无会话概念）
+  const runDir = await fileStore.ensureRunDir(runId);
+  const tracker = createRunFileTracker(fileStore, runId);
 
   try {
     const result = await runClaude({
@@ -88,6 +104,8 @@ async function handleNonStreaming(
       cwd: config.sourceRepoPath,
       config,
       model,
+      label: runId,
+      outputDir: runDir,
       onEvent: (event: StreamEvent) => {
         if (event.type === 'text_delta') {
           content += event.delta;
@@ -98,11 +116,25 @@ async function handleNonStreaming(
             total_tokens: event.inputTokens + event.outputTokens,
           };
         }
+        tracker.handleEvent(event);
       },
     });
+    console.log(
+      `[openai] run ${runId} end exitCode=${result.exitCode} ` +
+        `durationMs=${Date.now() - t0} killReason=${result.killReason ?? '-'}`,
+    );
+
+    // 生成文件清单
+    const files = await tracker.finalize();
+    const fileInfos: FileInfo[] = files.map((f) => ({
+      fileId: f.fileId,
+      name: f.name,
+      url: `/api/files/${f.fileId}`,
+      size: f.size,
+    }));
 
     if (result.exitCode !== 0) {
-      return c.json(openAIError(`Claude Code 异常退出 (exit code: ${result.exitCode})`), 500);
+      return c.json(openAIError(runFailureMessage(result, config.runTimeoutMs)), 500);
     }
 
     return c.json({
@@ -116,6 +148,7 @@ async function handleNonStreaming(
         finish_reason: 'stop',
       }],
       usage,
+      files: fileInfos, // 非标准扩展字段，OpenAI 客户端会忽略
     });
   } catch (err: any) {
     if (err instanceof ConcurrentLimitError) {
@@ -132,10 +165,16 @@ async function handleStreaming(
   config: AppConfig,
   messages: ChatMessage[],
   model: string | undefined,
+  fileStore: FileStore,
 ): Promise<Response> {
   const runId = crypto.randomUUID();
   const id = `chatcmpl-${runId}`;
   const created = Math.floor(Date.now() / 1000);
+  const t0 = Date.now();
+  console.log(
+    `[openai] run ${runId} start stream=true ` +
+      `model=${model ?? '(config:' + (config.model ?? 'default') + ')'} messages=${messages.length}`,
+  );
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
@@ -163,20 +202,47 @@ async function handleStreaming(
       // 首帧：声明角色
       chunk({ role: 'assistant', content: '' }, null);
 
+      // 工作区按 runId 隔离（OpenAI 端点无会话概念）
+      const runDir = await fileStore.ensureRunDir(runId);
+      const tracker = createRunFileTracker(fileStore, runId);
+
       try {
         const result = await runClaude({
           messages,
           cwd: config.sourceRepoPath,
           config,
           model,
+          label: runId,
+          outputDir: runDir,
           onEvent: (event: StreamEvent) => {
             if (event.type === 'text_delta' && event.delta) {
               chunk({ content: event.delta }, null);
             } else if (event.type === 'error') {
               chunk({}, null);
             }
+            tracker.handleEvent(event);
           },
         });
+        console.log(
+          `[openai] run ${runId} end exitCode=${result.exitCode} ` +
+            `durationMs=${Date.now() - t0} killReason=${result.killReason ?? '-'}`,
+        );
+
+        // 非零退出（含超时被终止）：以 text delta 形式把原因告诉客户端，
+        // 避免静默返回空内容
+        if (result.exitCode !== 0) {
+          chunk({ content: `\n\n[${runFailureMessage(result, config.runTimeoutMs)}]` }, null);
+        }
+
+        // 生成文件：结尾追加一条 text delta（不发独立 event:file 帧，
+        // 严格 OpenAI SDK 解析器会尝试把每个 data: 都解析成 chunk 而抛错）
+        const files = await tracker.finalize();
+        if (files.length > 0) {
+          const summary = files
+            .map((f) => `${f.name} -> /api/files/${f.fileId}`)
+            .join('; ');
+          chunk({ content: `\n\n[Generated files: ${summary}]` }, null);
+        }
 
         // 收尾帧
         chunk({}, 'stop');

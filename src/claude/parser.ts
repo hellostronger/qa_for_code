@@ -36,7 +36,10 @@ interface ParseState {
 
 // ========== 入口 ==========
 
-export function createClaudeParser(onEvent: (ev: StreamEvent) => void) {
+export function createClaudeParser(
+  onEvent: (ev: StreamEvent) => void,
+  opts?: { onNonJsonLine?: (line: string) => void },
+) {
   let buffer = '';
   const state: ParseState = {
     currentBlock: null,
@@ -62,7 +65,8 @@ export function createClaudeParser(onEvent: (ev: StreamEvent) => void) {
           const obj: ClaudeLine = JSON.parse(trimmed);
           handleLine(obj, state, onEvent);
         } catch {
-          // JSON parse 失败 — 静默跳过，可能是非 JSON 诊断输出
+          // JSON parse 失败 — 可能是非 JSON 诊断输出，交给外部日志记录
+          opts?.onNonJsonLine?.(trimmed);
         }
       }
     },
@@ -73,7 +77,9 @@ export function createClaudeParser(onEvent: (ev: StreamEvent) => void) {
         try {
           const obj: ClaudeLine = JSON.parse(buffer.trim());
           handleLine(obj, state, onEvent);
-        } catch {}
+        } catch {
+          opts?.onNonJsonLine?.(buffer.trim());
+        }
       }
       // 确保始终发送 completed
       onEvent({ type: 'status', label: 'completed' });
