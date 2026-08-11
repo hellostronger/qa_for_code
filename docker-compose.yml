@@ -42,6 +42,10 @@ services:
       # --- 生成文件工作区 ---
       - WORKSPACE_DIR=/workspace
 
+      # --- 文件链接公开前缀（可选）---
+      # 设置后生成的 /api/files 链接固定用此前缀，不随调用方 Host 变化
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
+
       # --- 可选 ---
       - CLAUDE_MODEL=${CLAUDE_MODEL:-}
       - SESSION_TTL_MS=${SESSION_TTL_MS:-1800000}
