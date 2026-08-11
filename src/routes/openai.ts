@@ -109,6 +109,13 @@ async function handleNonStreaming(
       onEvent: (event: StreamEvent) => {
         if (event.type === 'text_delta') {
           content += event.delta;
+        } else if (event.type === 'tool_use' && event.name === 'Write') {
+          // Write 工具：把生成的文件内容并入回答文本，
+          // 与流式行为保持一致（文件仍照常保存/返回 files 清单）。
+          const fileContent = (event.input as { content?: unknown } | undefined)?.content;
+          if (typeof fileContent === 'string' && fileContent.length > 0) {
+            content += (content ? '\n\n' : '') + fileContent;
+          }
         } else if (event.type === 'usage') {
           usage = {
             prompt_tokens: event.inputTokens,
@@ -217,6 +224,13 @@ async function handleStreaming(
           onEvent: (event: StreamEvent) => {
             if (event.type === 'text_delta' && event.delta) {
               chunk({ content: event.delta }, null);
+            } else if (event.type === 'tool_use' && event.name === 'Write') {
+              // Write 工具：把要写入的文件内容作为流式文本推给客户端，
+              // 避免生成大文件时客户端长时间无输出、看起来像卡住。
+              const fileContent = (event.input as { content?: unknown } | undefined)?.content;
+              if (typeof fileContent === 'string' && fileContent.length > 0) {
+                chunk({ content: fileContent }, null);
+              }
             } else if (event.type === 'error') {
               chunk({}, null);
             }
