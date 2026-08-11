@@ -18,6 +18,7 @@ import { parseMessages } from '../claude/messages.js';
 import { findClaudeBinary } from '../claude/launch.js';
 import { createRunFileTracker } from '../files/tracker.js';
 import type { FileStore } from '../files/store.js';
+import { getPublicBaseUrl } from './public-url.js';
 import type { AppConfig, AskRequest, ChatMessage, FileInfo, StreamEvent } from '../types.js';
 
 export function createOpenAIRoute(config: AppConfig, fileStore: FileStore) {
@@ -133,10 +134,11 @@ async function handleNonStreaming(
 
     // 生成文件清单
     const files = await tracker.finalize();
+    const baseUrl = getPublicBaseUrl(c);
     const fileInfos: FileInfo[] = files.map((f) => ({
       fileId: f.fileId,
       name: f.name,
-      url: `/api/files/${f.fileId}`,
+      url: `${baseUrl}/api/files/${f.fileId}`,
       size: f.size,
     }));
 
@@ -252,8 +254,9 @@ async function handleStreaming(
         // 严格 OpenAI SDK 解析器会尝试把每个 data: 都解析成 chunk 而抛错）
         const files = await tracker.finalize();
         if (files.length > 0) {
+          const baseUrl = getPublicBaseUrl(c);
           const summary = files
-            .map((f) => `${f.name} -> /api/files/${f.fileId}`)
+            .map((f) => `${f.name} -> ${baseUrl}/api/files/${f.fileId}`)
             .join('; ');
           chunk({ content: `\n\n[Generated files: ${summary}]` }, null);
         }

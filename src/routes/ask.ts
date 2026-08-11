@@ -11,6 +11,7 @@ import { SSEEmitter, createSSEResponse } from '../sse.js';
 import { SessionManager } from '../sessions/manager.js';
 import { createRunFileTracker } from '../files/tracker.js';
 import type { FileStore } from '../files/store.js';
+import { getPublicBaseUrl } from './public-url.js';
 import type { AppConfig, AskRequest, AskResponse, ChatMessage, FileInfo, Message, StreamEvent } from '../types.js';
 
 // ========== 运行中的 run 追踪 ==========
@@ -90,7 +91,7 @@ export function createAskRoute(config: AppConfig, sessions: SessionManager, file
     sessions.addMessage(session.id, assistantMsg);
 
     // 不 await — 让 SSE 流独立运行
-    runInBackground(runId, messages, session.id, assistantMsg.id, config, sessions, fileStore, emitter, abort.signal);
+    runInBackground(runId, messages, session.id, assistantMsg.id, config, sessions, fileStore, emitter, abort.signal, getPublicBaseUrl(c));
 
     // 8. 返回 runId + sessionId
     const response: AskResponse = { runId, sessionId: session.id };
@@ -151,6 +152,7 @@ async function runInBackground(
   fileStore: FileStore,
   emitter: SSEEmitter,
   signal: AbortSignal,
+  publicBaseUrl: string,
 ): Promise<void> {
   // 会话级工作区（多轮共享，Claude 可继续修改上轮文件）
   const runDir = await fileStore.ensureRunDir(sessionId);
@@ -191,7 +193,7 @@ async function runInBackground(
       const fileInfos: FileInfo[] = files.map((f) => ({
         fileId: f.fileId,
         name: f.name,
-        url: `/api/files/${f.fileId}`,
+        url: `${publicBaseUrl}/api/files/${f.fileId}`,
         size: f.size,
       }));
       for (const info of fileInfos) {

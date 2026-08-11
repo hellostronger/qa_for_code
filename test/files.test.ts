@@ -12,6 +12,7 @@ import { FileStore } from '../src/files/store.js';
 import { createRunFileTracker } from '../src/files/tracker.js';
 import { buildSystemPrompt } from '../src/claude/prompt.js';
 import { createClaudeParser } from '../src/claude/parser.js';
+import { createApp } from '../src/server.js';
 import type { StreamEvent } from '../src/types.js';
 
 // ========== 临时目录工具 ==========
@@ -165,6 +166,41 @@ describe('FileStore', () => {
     await new Promise((res) => setTimeout(res, 100));
     await store.deleteExpired();
     assert.equal(store.get(r.fileId), undefined);
+  });
+});
+
+// ========== 下载路由 ==========
+
+describe('files 下载路由', () => {
+  it('GET /api/files/:id 返回文件内容', async () => {
+    const base = path.join(tmpDir, 'ws');
+    const { app, sessions, files } = createApp({
+      port: 0,
+      sourceRepoPath: tmpDir,
+      workspaceDir: base,
+      sessionTtlMs: 60000,
+      runTimeoutMs: 10000,
+      maxConcurrentRuns: 1,
+    });
+    try {
+      const runDir = await files.ensureRunDir('run1');
+      const content = '你好，小说内容 hello world';
+      await fs.writeFile(path.join(runDir, 'novel.md'), content);
+      const rec = files.createFile({
+        runId: 'run1',
+        name: 'novel.md',
+        relativePath: 'novel.md',
+        size: Buffer.byteLength(content),
+      });
+
+      const res = await app.request(`/api/files/${rec.fileId}`);
+      const bodyText = await res.text();
+      assert.equal(res.status, 200, `应 200，实际: ${res.status}`);
+      assert.equal(bodyText, content);
+    } finally {
+      files.destroy();
+      sessions.destroy();
+    }
   });
 });
 
