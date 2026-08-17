@@ -83,6 +83,26 @@ export async function runClaude(options: RunOptions): Promise<RunResult> {
   let cleaned = false;
   let killedBy: 'timeout' | 'abort' | null = null;
 
+  // 记录最后一条 stderr / 非 JSON stdout，退出时随 finished 行一起打印，
+  // 方便直接看出失败原因（如网关 403 认证错误）。authFailureLogged 防止重复告警。
+  let lastStderr: string | null = null;
+  let lastStdoutNonJson: string | null = null;
+  let authFailureLogged = false;
+
+  // 检测网关认证失败（403 / Failed to authenticate），打印显眼的排查指引。
+  // 这类错误发生在"调用模型之前的认证步骤"，与具体指令/工具无关。
+  const logAuthFailure = (text: string) => {
+    if (authFailureLogged) return;
+    if (/Failed to authenticate|403 Authorization|authorization failed|authentication failed/i.test(text)) {
+      authFailureLogged = true;
+      warn('⚠ 检测到网关认证失败 (Failed to authenticate / 403 Authorization):');
+      warn('  原始信息: ' + text.slice(0, 400));
+      warn('  排查方向: 1) ANTHROPIC_AUTH_TOKEN 是否有效/未过期');
+      warn('             2) 网关每 key 并发会话限制（等当前 run 结束后重发是否恢复）');
+      warn('             3) 该 key 对该模型 (stepfun-ai/...) 的分组/权限是否允许');
+    }
+  };
+
   // 原生 stdout/stderr 环形缓冲：定位挂起时看最后输出到哪一行
   const stdoutTail: string[] = [];
   const stderrTail: string[] = [];
@@ -221,13 +241,18 @@ export async function runClaude(options: RunOptions): Promise<RunResult> {
       onEvent(event);
     }, {
       // 非 JSON 的诊断输出是重要的排错线索，记录下来
-      onNonJsonLine: (line) => log('stdout(non-json):', line.slice(0, 400)),
+      onNonJsonLine: (line) => {
+        log('stdout(non-json):', line.slice(0, 400));
+        lastStdoutNonJson = line.slice(0, 400);
+        logAuthFailure(line);
+      },
     });
 
     // ── 8. stdout ──
     child.stdout?.setEncoding('utf8');
     child.stdout?.on('data', (chunk: string) => {
       pushTail(stdoutTail, chunk);
+      logAuthFailure(chunk);
       parser.feed(chunk);
     });
 
@@ -236,8 +261,12 @@ export async function runClaude(options: RunOptions): Promise<RunResult> {
       const text = chunk.toString('utf8');
       pushTail(stderrTail, text);
       const trimmed = text.trim();
-      if (trimmed && !isDiagnosticNoise(trimmed)) {
-        onEvent({ type: 'error', message: trimmed.slice(0, 1000) });
+      if (trimmed) {
+        lastStderr = trimmed.slice(0, 400);
+        logAuthFailure(trimmed);
+        if (!isDiagnosticNoise(trimmed)) {
+          onEvent({ type: 'error', message: trimmed.slice(0, 1000) });
+        }
       }
     });
 
@@ -266,7 +295,11 @@ export async function runClaude(options: RunOptions): Promise<RunResult> {
         parser.flush();
         cleanup();
         const durationMs = Date.now() - startedAt;
-        log(`finished exitCode=${code ?? 1} durationMs=${durationMs} killedBy=${killedBy ?? '-'}`);
+        log(
+          `finished exitCode=${code ?? 1} durationMs=${durationMs} killedBy=${killedBy ?? '-'}` +
+            (lastStderr ? ` last stderr: ${lastStderr.slice(0, 200)}` : '') +
+            (lastStdoutNonJson ? ` | last non-json stdout: ${lastStdoutNonJson.slice(0, 200)}` : ''),
+        );
         if (killedBy || (code ?? 1) !== 0) {
           dumpTails(`exit=${code ?? 1}${killedBy ? ` killedBy=${killedBy}` : ''}`);
         }
